@@ -1,0 +1,85 @@
+name: Build Debian Package (fork)
+
+on:
+  push:
+    tags: ['v*-fork']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ubuntu:22.04
+      options: --user root
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            wget tar xz-utils zstd jq dpkg-dev iproute2 sudo nodejs curl
+
+      - name: Build .deb package
+        run: |
+          chmod +x scripts/build-deb.sh
+          ./scripts/build-deb.sh
+
+      - name: Locate built .deb
+        id: find-deb
+        run: |
+          DEB_FILE=$(find /tmp/oasis-deb-build -name '*.deb' -type f | head -1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "ERROR: No .deb file found"
+            exit 1
+          fi
+          echo "deb_path=$DEB_FILE" >> "$GITHUB_OUTPUT"
+          echo "deb_name=$(basename "$DEB_FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .deb as artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: oasis-deb-${{ matrix.arch }}
+          path: ${{ steps.find-deb.outputs.deb_path }}
+          retention-days: 30
+
+  release:
+    needs: build-deb
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download amd64 artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: oasis-deb-amd64
+          path: debs/
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: oasis-deb-arm64
+          path: debs/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: debs/*.deb
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
